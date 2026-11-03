@@ -21,7 +21,13 @@ Add `typedenv` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-typedenv = "0.2"
+typedenv = "0.2.1"
+```
+
+Or using `cargo add`:
+
+```bash
+cargo add typedenv
 ```
 
 ## Quick Start
