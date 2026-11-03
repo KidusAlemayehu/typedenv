@@ -28,7 +28,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![warn(missing_docs)]
 
-use std::{collections::HashMap, env, error::Error, fmt, str::FromStr};
+use std::{borrow::Cow, collections::HashMap, env, error::Error, fmt, str::FromStr};
 
 type FileVars = HashMap<String, String>;
 
@@ -39,19 +39,19 @@ pub enum EnvError {
     /// The environment variable is not set.
     Missing {
         /// The name of the missing variable.
-        name: String,
+        name: Cow<'static, str>,
     },
 
     /// The environment variable's value is not valid Unicode.
     NotUnicode {
         /// The name of the variable.
-        name: String,
+        name: Cow<'static, str>,
     },
 
     /// The environment variable value exists but could not be parsed into the target type.
     Invalid {
         /// The name of the variable.
-        name: String,
+        name: Cow<'static, str>,
         /// The raw value of the variable.
         value: String,
         /// The reason why parsing or processing failed.
@@ -76,6 +76,17 @@ impl EnvError {
         match self {
             EnvError::Missing { name }
             | EnvError::NotUnicode { name }
+            | EnvError::Invalid { name, .. } => Some(name.as_ref()),
+            EnvError::Dotenv { .. } => None,
+        }
+    }
+
+    /// The name of the variable as a [`Cow<'static, str>`], or `None` if the error
+    /// is file-scoped.
+    pub fn name_cow(&self) -> Option<&Cow<'static, str>> {
+        match self {
+            EnvError::Missing { name }
+            | EnvError::NotUnicode { name }
             | EnvError::Invalid { name, .. } => Some(name),
             EnvError::Dotenv { .. } => None,
         }
@@ -91,7 +102,11 @@ impl fmt::Display for EnvError {
             EnvError::NotUnicode { name } => {
                 write!(f, "environment variable `{name}` is not valid unicode")
             }
-            EnvError::Invalid { name, value, reason } => write!(
+            EnvError::Invalid {
+                name,
+                value,
+                reason,
+            } => write!(
                 f,
                 "environment variable `{name}` has invalid value `{value}`: {reason}"
             ),
@@ -177,7 +192,11 @@ impl<'a> IntoIterator for &'a Errors {
 impl fmt::Display for Errors {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let n = self.0.len();
-        write!(f, "{n} configuration error{}:", if n == 1 { "" } else { "s" })?;
+        write!(
+            f,
+            "{n} configuration error{}:",
+            if n == 1 { "" } else { "s" }
+        )?;
         for e in &self.0 {
             write!(f, "\n - {e}")?;
         }
@@ -221,90 +240,120 @@ where
     Ok(out)
 }
 
-/// Reads and parses a variable. `Ok(None)` means "not set".
-fn read<T>(
-    name: &str,
+/// Reads and parses an optional variable. `Ok(None)` means "not set".
+fn read_opt<T>(
+    name: Cow<'static, str>,
     file: &FileVars,
     parse: impl FnOnce(&str) -> Result<T, String>,
 ) -> Result<Option<T>, EnvError> {
-    match env::var(name) {
+    match env::var(name.as_ref()) {
         Ok(raw) => match parse(raw.trim()) {
             Ok(v) => Ok(Some(v)),
             Err(reason) => Err(EnvError::Invalid {
-                name: name.to_string(),
+                name,
                 value: raw,
                 reason,
             }),
         },
-        Err(env::VarError::NotPresent) => match file.get(name) {
+        Err(env::VarError::NotPresent) => match file.get(name.as_ref()) {
             Some(raw) => match parse(raw.trim()) {
                 Ok(v) => Ok(Some(v)),
                 Err(reason) => Err(EnvError::Invalid {
-                    name: name.to_string(),
+                    name,
                     value: raw.clone(),
                     reason,
                 }),
             },
             None => Ok(None),
         },
-        Err(env::VarError::NotUnicode(_)) => Err(EnvError::NotUnicode {
-            name: name.to_string(),
-        }),
+        Err(env::VarError::NotUnicode(_)) => Err(EnvError::NotUnicode { name }),
     }
 }
 
-fn read_env<T>(
-    name: &str,
+/// Reads and parses a required variable. Unset returns `Err(EnvError::Missing)`.
+fn read_req<T>(
+    name: Cow<'static, str>,
+    file: &FileVars,
+    parse: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, EnvError> {
+    match env::var(name.as_ref()) {
+        Ok(raw) => match parse(raw.trim()) {
+            Ok(v) => Ok(v),
+            Err(reason) => Err(EnvError::Invalid {
+                name,
+                value: raw,
+                reason,
+            }),
+        },
+        Err(env::VarError::NotPresent) => match file.get(name.as_ref()) {
+            Some(raw) => match parse(raw.trim()) {
+                Ok(v) => Ok(v),
+                Err(reason) => Err(EnvError::Invalid {
+                    name,
+                    value: raw.clone(),
+                    reason,
+                }),
+            },
+            None => Err(EnvError::Missing { name }),
+        },
+        Err(env::VarError::NotUnicode(_)) => Err(EnvError::NotUnicode { name }),
+    }
+}
+
+fn read_env_opt<T>(
+    name: Cow<'static, str>,
     parse: impl FnOnce(&str) -> Result<T, String>,
 ) -> Result<Option<T>, EnvError> {
     let empty = FileVars::new();
-    read(name, &empty, parse)
+    read_opt(name, &empty, parse)
 }
 
-fn missing(name: &str) -> EnvError {
-    EnvError::Missing {
-        name: name.to_string(),
-    }
+fn read_env_req<T>(
+    name: Cow<'static, str>,
+    parse: impl FnOnce(&str) -> Result<T, String>,
+) -> Result<T, EnvError> {
+    let empty = FileVars::new();
+    read_req(name, &empty, parse)
 }
 
 /// Reads a required variable.
-pub fn var<T>(name: &str) -> Result<T, EnvError>
+pub fn var<T>(name: impl Into<Cow<'static, str>>) -> Result<T, EnvError>
 where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    read_env(name, parse_str::<T>)?.ok_or_else(|| missing(name))
+    read_env_req(name.into(), parse_str::<T>)
 }
 
 /// Reads a variable, using `default` only when it is **unset**.
 ///
 /// A value that is set but malformed is still an error.
-pub fn var_or<T>(name: &str, default: T) -> Result<T, EnvError>
+pub fn var_or<T>(name: impl Into<Cow<'static, str>>, default: T) -> Result<T, EnvError>
 where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    Ok(read_env(name, parse_str::<T>)?.unwrap_or(default))
+    Ok(read_env_opt(name.into(), parse_str::<T>)?.unwrap_or(default))
 }
 
 /// Reads an optional variable: `Ok(None)` when unset.
-pub fn var_opt<T>(name: &str) -> Result<Option<T>, EnvError>
+pub fn var_opt<T>(name: impl Into<Cow<'static, str>>) -> Result<Option<T>, EnvError>
 where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    read_env(name, parse_str::<T>)
+    read_env_opt(name.into(), parse_str::<T>)
 }
 
 /// Reads a required boolean. Accepts `true/false/1/0/yes/no/y/n/on/off`
 /// (case-insensitive).
-pub fn var_bool(name: &str) -> Result<bool, EnvError> {
-    read_env(name, parse_bool)?.ok_or_else(|| missing(name))
+pub fn var_bool(name: impl Into<Cow<'static, str>>) -> Result<bool, EnvError> {
+    read_env_req(name.into(), parse_bool)
 }
 
 /// Reads a boolean, using `default` only when unset.
-pub fn var_bool_or(name: &str, default: bool) -> Result<bool, EnvError> {
-    Ok(read_env(name, parse_bool)?.unwrap_or(default))
+pub fn var_bool_or(name: impl Into<Cow<'static, str>>, default: bool) -> Result<bool, EnvError> {
+    Ok(read_env_opt(name.into(), parse_bool)?.unwrap_or(default))
 }
 
 /// Reads a required list, split on `sep`. Items are trimmed and empty items
@@ -318,21 +367,25 @@ pub fn var_bool_or(name: &str, default: bool) -> Result<bool, EnvError> {
 /// # Ok(())
 /// # }
 /// ```
-pub fn var_list<T>(name: &str, sep: char) -> Result<Vec<T>, EnvError>
+pub fn var_list<T>(name: impl Into<Cow<'static, str>>, sep: char) -> Result<Vec<T>, EnvError>
 where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    read_env(name, |s| parse_list::<T>(s, sep))?.ok_or_else(|| missing(name))
+    read_env_req(name.into(), |s| parse_list::<T>(s, sep))
 }
 
 /// Like [`var_list`], using `default` only when the variable is unset.
-pub fn var_list_or<T>(name: &str, sep: char, default: Vec<T>) -> Result<Vec<T>, EnvError>
+pub fn var_list_or<T>(
+    name: impl Into<Cow<'static, str>>,
+    sep: char,
+    default: Vec<T>,
+) -> Result<Vec<T>, EnvError>
 where
     T: FromStr,
     T::Err: fmt::Display,
 {
-    Ok(read_env(name, |s| parse_list::<T>(s, sep))?.unwrap_or(default))
+    Ok(read_env_opt(name.into(), |s| parse_list::<T>(s, sep))?.unwrap_or(default))
 }
 
 // ---------------------------------------------------------------------------
@@ -358,12 +411,12 @@ impl Loader {
     }
 
     /// `None` if unset or invalid (invalid is recorded).
-    fn lookup<T>(
+    fn lookup_opt<T>(
         &mut self,
-        name: &str,
+        name: Cow<'static, str>,
         parse: impl FnOnce(&str) -> Result<T, String>,
     ) -> Option<T> {
-        match read(name, &self.file, parse) {
+        match read_opt(name, &self.file, parse) {
             Ok(v) => v,
             Err(e) => {
                 self.errors.push(e);
@@ -372,18 +425,14 @@ impl Loader {
         }
     }
 
-    /// Like `lookup`, but unset is also an error. Returns `T::default()` on failure.
-    fn lookup_required<T: Default>(
+    /// Like `lookup_opt`, but unset is also an error. Returns `T::default()` on failure.
+    fn lookup_req<T: Default>(
         &mut self,
-        name: &str,
+        name: Cow<'static, str>,
         parse: impl FnOnce(&str) -> Result<T, String>,
     ) -> T {
-        match read(name, &self.file, parse) {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                self.errors.push(missing(name));
-                T::default()
-            }
+        match read_req(name, &self.file, parse) {
+            Ok(v) => v,
             Err(e) => {
                 self.errors.push(e);
                 T::default()
@@ -441,22 +490,22 @@ impl Loader {
     ///
     /// For types that do not implement [`Default`], consider [`Loader::var_or`]
     /// or [`Loader::var_opt`].
-    pub fn var<T>(&mut self, name: &str) -> T
+    pub fn var<T>(&mut self, name: impl Into<Cow<'static, str>>) -> T
     where
         T: FromStr + Default,
         T::Err: fmt::Display,
     {
-        self.lookup_required(name, parse_str::<T>)
+        self.lookup_req(name.into(), parse_str::<T>)
     }
 
     /// Variable with a default used only when unset. Malformed values are
     /// recorded as errors (and `default` is returned as a placeholder).
-    pub fn var_or<T>(&mut self, name: &str, default: T) -> T
+    pub fn var_or<T>(&mut self, name: impl Into<Cow<'static, str>>, default: T) -> T
     where
         T: FromStr,
         T::Err: fmt::Display,
     {
-        match read(name, &self.file, parse_str::<T>) {
+        match read_opt(name.into(), &self.file, parse_str::<T>) {
             Ok(Some(v)) => v,
             Ok(None) => default,
             Err(e) => {
@@ -468,22 +517,22 @@ impl Loader {
 
     /// Optional variable. `None` when unset or when malformed (the latter is
     /// also recorded as an error).
-    pub fn var_opt<T>(&mut self, name: &str) -> Option<T>
+    pub fn var_opt<T>(&mut self, name: impl Into<Cow<'static, str>>) -> Option<T>
     where
         T: FromStr,
         T::Err: fmt::Display,
     {
-        self.lookup(name, parse_str::<T>)
+        self.lookup_opt(name.into(), parse_str::<T>)
     }
 
     /// Required boolean (`true/false/1/0/yes/no/y/n/on/off`).
-    pub fn var_bool(&mut self, name: &str) -> bool {
-        self.lookup_required(name, parse_bool)
+    pub fn var_bool(&mut self, name: impl Into<Cow<'static, str>>) -> bool {
+        self.lookup_req(name.into(), parse_bool)
     }
 
     /// Boolean with a default used only when unset.
-    pub fn var_bool_or(&mut self, name: &str, default: bool) -> bool {
-        match read(name, &self.file, parse_bool) {
+    pub fn var_bool_or(&mut self, name: impl Into<Cow<'static, str>>, default: bool) -> bool {
+        match read_opt(name.into(), &self.file, parse_bool) {
             Ok(Some(v)) => v,
             Ok(None) => default,
             Err(e) => {
@@ -494,21 +543,26 @@ impl Loader {
     }
 
     /// Required list split on `sep`. Returns an empty vector on failure and records an error.
-    pub fn var_list<T>(&mut self, name: &str, sep: char) -> Vec<T>
+    pub fn var_list<T>(&mut self, name: impl Into<Cow<'static, str>>, sep: char) -> Vec<T>
     where
         T: FromStr,
         T::Err: fmt::Display,
     {
-        self.lookup_required(name, |s| parse_list::<T>(s, sep))
+        self.lookup_req(name.into(), |s| parse_list::<T>(s, sep))
     }
 
     /// List with a default used only when unset.
-    pub fn var_list_or<T>(&mut self, name: &str, sep: char, default: Vec<T>) -> Vec<T>
+    pub fn var_list_or<T>(
+        &mut self,
+        name: impl Into<Cow<'static, str>>,
+        sep: char,
+        default: Vec<T>,
+    ) -> Vec<T>
     where
         T: FromStr,
         T::Err: fmt::Display,
     {
-        match read(name, &self.file, |s| parse_list::<T>(s, sep)) {
+        match read_opt(name.into(), &self.file, |s| parse_list::<T>(s, sep)) {
             Ok(Some(v)) => v,
             Ok(None) => default,
             Err(e) => {
@@ -677,7 +731,13 @@ mod tests {
 
     #[test]
     fn bool_forms() {
-        for (raw, want) in [("1", true), ("YES", true), ("on", true), ("0", false), ("No", false)] {
+        for (raw, want) in [
+            ("1", true),
+            ("YES", true),
+            ("on", true),
+            ("0", false),
+            ("No", false),
+        ] {
             set("TYPEDENV_T4_BOOL", raw);
             assert_eq!(var_bool("TYPEDENV_T4_BOOL").unwrap(), want, "{raw}");
         }
@@ -721,7 +781,11 @@ mod tests {
             ["a", "b", "c"]
         );
         set("TYPEDENV_T7_EMPTY", "");
-        assert!(var_list::<u16>("TYPEDENV_T7_EMPTY", ',').unwrap().is_empty());
+        assert!(
+            var_list::<u16>("TYPEDENV_T7_EMPTY", ',')
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             var_list_or("TYPEDENV_T7_UNSET", ',', vec![1u16]).unwrap(),
             [1]
@@ -824,5 +888,64 @@ H=# only comment
         let _ = std::fs::remove_file(&path);
         assert_eq!(errs.len(), 1);
         assert!(errs.to_string().contains(":1: invalid .env syntax"));
+    }
+
+    #[test]
+    fn zero_allocation_cow_keys() {
+        // 1. Static literal key produces Cow::Borrowed on error (0 heap allocations)
+        let err = var::<u16>("TYPEDENV_T11_BORROWED_MISSING").unwrap_err();
+        match &err {
+            EnvError::Missing { name } => {
+                assert!(matches!(name, Cow::Borrowed(_)));
+                assert_eq!(name, "TYPEDENV_T11_BORROWED_MISSING");
+            }
+            _ => panic!("expected missing error"),
+        }
+        assert_eq!(err.name(), Some("TYPEDENV_T11_BORROWED_MISSING"));
+        assert_eq!(
+            err.name_cow(),
+            Some(&Cow::Borrowed("TYPEDENV_T11_BORROWED_MISSING"))
+        );
+
+        // 2. Static literal key with invalid value produces Cow::Borrowed
+        set("TYPEDENV_T11_INVALID", "not-a-number");
+        let err_inv = var::<u16>("TYPEDENV_T11_INVALID").unwrap_err();
+        match &err_inv {
+            EnvError::Invalid { name, .. } => {
+                assert!(matches!(name, Cow::Borrowed(_)));
+                assert_eq!(name, "TYPEDENV_T11_INVALID");
+            }
+            _ => panic!("expected invalid error"),
+        }
+        assert_eq!(
+            err_inv.name_cow(),
+            Some(&Cow::Borrowed("TYPEDENV_T11_INVALID"))
+        );
+
+        // 3. Dynamic owned String key produces Cow::Owned
+        let dyn_key = format!("TYPEDENV_T11_DYNAMIC_{}", 42);
+        let err_dyn = var::<u16>(dyn_key).unwrap_err();
+        match &err_dyn {
+            EnvError::Missing { name } => {
+                assert!(matches!(name, Cow::Owned(_)));
+                assert_eq!(name, "TYPEDENV_T11_DYNAMIC_42");
+            }
+            _ => panic!("expected missing error"),
+        }
+
+        // 4. Loader preserves Cow::Borrowed for static keys
+        let mut loader = Loader::new();
+        let _v1: u16 = loader.var("TYPEDENV_T11_LOADER_MISSING");
+        let _v2: u16 = loader.var_or("TYPEDENV_T11_INVALID", 999);
+        let errs = loader.finish().unwrap_err();
+        assert_eq!(errs.len(), 2);
+        assert!(matches!(
+            errs[0].name_cow(),
+            Some(Cow::Borrowed("TYPEDENV_T11_LOADER_MISSING"))
+        ));
+        assert!(matches!(
+            errs[1].name_cow(),
+            Some(Cow::Borrowed("TYPEDENV_T11_INVALID"))
+        ));
     }
 }

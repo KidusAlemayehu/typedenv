@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1] - 2026-11-03
+
+### Added
+- **Zero-allocation key lookups (`Cow<'static, str>`)**: Public standalone functions (`var`, `var_or`, `var_opt`, `var_bool`, `var_bool_or`, `var_list`, `var_list_or`) and all `Loader` methods now accept `impl Into<Cow<'static, str>>`.
+  - Static string literal keys (`"DATABASE_URL"`) produce `Cow::Borrowed` with zero heap allocations on both success and error paths.
+  - Dynamically constructed strings (`String`) are accepted seamlessly as `Cow::Owned`.
+- **Structured Cow error inspection**: Added [`EnvError::name_cow`] method returning `Option<&Cow<'static, str>>` alongside existing [`EnvError::name`] (`Option<&str>`).
+
+### Performance
+- Eliminated all heap allocations for static string literal keys when constructing `EnvError::Missing`, `EnvError::Invalid`, and `EnvError::NotUnicode`.
+
+---
+
 ## [0.2.0] - 2026-10-29
 
 ### Added

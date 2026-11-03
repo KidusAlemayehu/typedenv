@@ -11,6 +11,7 @@ Tiny, zero-dependency typed access to environment variables in Rust with built-i
 - **Strict defaults**: An environment variable that is set but invalid returns an error—it is never silently replaced by a default.
 - **Clear errors**: Identifies which variable, list index, or `.env` line number failed and why.
 - **Batch validation**: Collect all configuration errors in one go with `Loader`, instead of failing on the first one.
+- **Zero-allocation keys**: Key lookups take `impl Into<Cow<'static, str>>`, completely eliminating heap allocations for static string literals on both success and error paths.
 - **Zero dependencies**: Pure standard library.
 - **Safe**: Built with `#![forbid(unsafe_code)]`.
 
@@ -176,6 +177,67 @@ Configuration error:
  - environment variable `JWT_SECRET` is not set
  - environment variable `PORT` has invalid value `eight-thousand`: invalid digit found in string
 ```
+
+---
+
+### Global Shared Config with `std::sync::LazyLock`
+
+Because `typedenv` operates through clean, runtime function evaluation rather than heavy procedural derive macros, it fits naturally with modern static initialization using Rust's standard library `std::sync::LazyLock`:
+
+```rust
+use std::sync::LazyLock;
+use typedenv::{Loader, Errors};
+
+pub struct AppConfig {
+    pub database_url: String,
+    pub port: u16,
+    pub debug: bool,
+}
+
+impl AppConfig {
+    pub fn load() -> Result<Self, Errors> {
+        let mut cfg = Loader::new().with_dotenv(".env");
+        let config = Self {
+            database_url: cfg.var("DATABASE_URL"),
+            port: cfg.var_or("PORT", 8080),
+            debug: cfg.var_bool_or("DEBUG", false),
+        };
+        cfg.finish()?;
+        Ok(config)
+    }
+}
+
+/// Global, thread-safe configuration initialized on first access.
+/// Halts startup with an exhaustive batch report if configuration is invalid.
+pub static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
+    AppConfig::load().unwrap_or_else(|errs| {
+        eprintln!("Configuration error:\n{errs}");
+        std::process::exit(1);
+    })
+});
+
+fn main() {
+    println!("Connecting to database: {}", CONFIG.database_url);
+    println!("Server running on port: {}", CONFIG.port);
+}
+```
+
+---
+
+### Zero-Allocation Key Lookups
+
+All lookup signatures accept `impl Into<Cow<'static, str>>`:
+
+```rust
+// 1. Static string literals use Cow::Borrowed: ZERO heap allocations
+let port: u16 = typedenv::var("PORT")?;
+
+// 2. Dynamic keys accept owned Strings seamlessly without manual conversion
+let prefix = "AUTH";
+let secret: String = typedenv::var(format!("{prefix}_SECRET_KEY"))?;
+```
+
+When string literals are used, no heap allocations occur during lookup, and any resulting [`EnvError::Missing`], [`EnvError::Invalid`], or [`EnvError::NotUnicode`] variant stores the borrowed `&'static str` directly inside `Cow::Borrowed`.
 
 ---
 

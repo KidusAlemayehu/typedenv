@@ -1,5 +1,5 @@
-use typedenv::{var, var_bool, var_bool_or, var_opt, var_or, EnvError, Loader};
 use std::env;
+use typedenv::{EnvError, Loader, var, var_bool, var_bool_or, var_opt, var_or};
 
 #[test]
 fn test_var_lookups() {
@@ -17,21 +17,32 @@ fn test_var_lookups() {
     assert_eq!(var::<u16>(key_ok).unwrap(), 8080);
     assert_eq!(var::<String>(key_ok).unwrap(), "8080");
     assert!(matches!(var::<u16>(key_bad), Err(EnvError::Invalid { .. })));
-    assert!(matches!(var::<u16>(key_missing), Err(EnvError::Missing { .. })));
+    assert!(matches!(
+        var::<u16>(key_missing),
+        Err(EnvError::Missing { .. })
+    ));
 
     // var_or: malformed is an error!
     assert_eq!(var_or::<u16>(key_ok, 3000).unwrap(), 8080);
     assert_eq!(var_or::<u16>(key_missing, 3000).unwrap(), 3000);
-    assert!(matches!(var_or::<u16>(key_bad, 3000), Err(EnvError::Invalid { .. })));
+    assert!(matches!(
+        var_or::<u16>(key_bad, 3000),
+        Err(EnvError::Invalid { .. })
+    ));
 
     // var_opt
     assert_eq!(var_opt::<u16>(key_ok).unwrap(), Some(8080));
     assert_eq!(var_opt::<u16>(key_missing).unwrap(), None);
-    assert!(matches!(var_opt::<u16>(key_bad), Err(EnvError::Invalid { .. })));
+    assert!(matches!(
+        var_opt::<u16>(key_bad),
+        Err(EnvError::Invalid { .. })
+    ));
 
     // var_bool and var_bool_or
     let key_bool = "ENVTYPED_TEST_FLAG";
-    unsafe { env::set_var(key_bool, "yes"); }
+    unsafe {
+        env::set_var(key_bool, "yes");
+    }
     assert!(var_bool(key_bool).unwrap());
     assert!(!var_bool_or("ENVTYPED_TEST_UNSET_BOOL", false).unwrap());
 
@@ -106,4 +117,29 @@ fn test_loader_accumulates_errors() {
         env::remove_var(key_valid);
         env::remove_var(key_invalid);
     }
+}
+
+#[test]
+fn test_zero_allocation_cow_keys() {
+    use std::borrow::Cow;
+
+    let static_key = "ENVTYPED_INTEG_MISSING";
+    let err = var::<u16>(static_key).unwrap_err();
+    assert_eq!(err.name(), Some(static_key));
+    assert_eq!(err.name_cow(), Some(&Cow::Borrowed(static_key)));
+
+    let owned_key = format!("ENVTYPED_INTEG_OWNED_{}", 99);
+    let err_owned = var::<u16>(owned_key).unwrap_err();
+    assert_eq!(err_owned.name(), Some("ENVTYPED_INTEG_OWNED_99"));
+    assert_eq!(
+        err_owned.name_cow(),
+        Some(&Cow::Owned("ENVTYPED_INTEG_OWNED_99".to_string()))
+    );
+
+    let cow_direct: Cow<'static, str> = Cow::Borrowed("ENVTYPED_INTEG_DIRECT");
+    let err_cow = var::<u16>(cow_direct).unwrap_err();
+    assert_eq!(
+        err_cow.name_cow(),
+        Some(&Cow::Borrowed("ENVTYPED_INTEG_DIRECT"))
+    );
 }
