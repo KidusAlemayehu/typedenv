@@ -1,28 +1,76 @@
 //! # typedenv
 //!
-//! Tiny, zero-dependency typed access to environment variables.
+//! Tiny, zero-dependency typed access to environment variables with built-in
+//! `.env` file support and batch error reporting.
 //!
-//! * Parse into any `T: FromStr`.
-//! * A set-but-invalid value is an **error**, never silently replaced by a default.
-//! * Errors name the variable and say what was wrong.
-//! * [`Loader`] collects *all* problems and reports them at once.
+//! * **Typed Access**: Parse into any type `T: FromStr`.
+//! * **Zero-Allocation Keys**: Accepts `impl Into<Cow<'static, str>>`, completely
+//!   avoiding heap allocations for static string literals on both success and error paths.
+//! * **Strict Defaults**: A set-but-invalid value is an **error**, never silently replaced by a default.
+//! * **Delimited Lists**: Parse separated values into `Vec<T>` with trimming and indexed errors.
+//! * **Case-Insensitive Booleans**: Accepts `true/false`, `1/0`, `yes/no`, `y/n`, and `on/off`.
+//! * **Batch Validation**: [`Loader`] collects *all* missing and malformed variables into [`Errors`].
+//! * **Built-in `.env` Support**: Load `.env` files into a [`Loader`] without external dependencies.
+//! * **Thread-Safe & Pure**: Does not mutate process-global environment variables.
+//!
+//! ## Quick Start
 //!
 //! ```
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! # unsafe { std::env::set_var("TYPEDENV_DOC_PORT", "9000"); }
-//! let port: u16 = typedenv::var_or("TYPEDENV_DOC_PORT", 8080)?;
-//! assert_eq!(port, 9000);
+//! # unsafe { std::env::set_var("TYPEDENV_PORT", "8080"); }
+//! let port: u16 = typedenv::var("TYPEDENV_PORT")?;
+//! let host: String = typedenv::var_or("TYPEDENV_HOST", "127.0.0.1".to_string())?;
+//! let debug: bool = typedenv::var_bool_or("TYPEDENV_DEBUG", false)?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Collecting every error in one go:
+//! ## Collecting All Errors at Once with [`Loader`]
+//!
+//! Instead of halting on the first missing variable, [`Loader`] records every problem:
 //!
 //! ```
 //! let mut cfg = typedenv::Loader::new();
-//! let _port: u16 = cfg.var_or("TYPEDENV_DOC_NOPE_PORT", 8080);
-//! let _db: String = cfg.var("TYPEDENV_DOC_NOPE_DB"); // missing -> recorded
-//! assert!(cfg.finish().is_err());
+//! let port: u16 = cfg.var_or("PORT", 8080);
+//! let db_url: String = cfg.var("DATABASE_URL");     // missing -> recorded
+//! let secret: String = cfg.var("JWT_SECRET");       // missing -> recorded
+//!
+//! if let Err(errs) = cfg.finish() {
+//!     assert_eq!(errs.len(), 2);
+//! }
+//! ```
+//!
+//! ## Global Configuration with `std::sync::LazyLock`
+//!
+//! Because `typedenv` uses runtime function calls rather than heavy derive macros,
+//! it pairs cleanly with modern static initialization:
+//!
+//! ```
+//! use std::sync::LazyLock;
+//! use typedenv::{Loader, Errors};
+//!
+//! struct AppConfig {
+//!     port: u16,
+//!     db_url: String,
+//! }
+//!
+//! impl AppConfig {
+//!     fn load() -> Result<Self, Errors> {
+//!         let mut cfg = Loader::new();
+//!         let config = Self {
+//!             port: cfg.var_or("APP_PORT", 3000),
+//!             db_url: cfg.var("APP_DATABASE_URL"),
+//!         };
+//!         cfg.finish()?;
+//!         Ok(config)
+//!     }
+//! }
+//!
+//! static CONFIG: LazyLock<AppConfig> = LazyLock::new(|| {
+//!     AppConfig::load().unwrap_or_else(|errs| {
+//!         panic!("Configuration error:\n{errs}");
+//!     })
+//! });
 //! ```
 
 #![cfg_attr(not(test), forbid(unsafe_code))]
@@ -70,7 +118,7 @@ pub enum EnvError {
 }
 
 impl EnvError {
-    /// The name of the variable this error is about, or `None` if the error
+    /// Returns the name of the variable this error is about, or `None` if the error
     /// is file-scoped (such as an `.env` I/O or syntax error).
     pub fn name(&self) -> Option<&str> {
         match self {
@@ -81,8 +129,11 @@ impl EnvError {
         }
     }
 
-    /// The name of the variable as a [`Cow<'static, str>`], or `None` if the error
+    /// Returns the name of the variable as a [`Cow<'static, str>`], or `None` if the error
     /// is file-scoped.
+    ///
+    /// When static string literals were used for lookup, this variant contains a zero-copy
+    /// [`Cow::Borrowed`].
     pub fn name_cow(&self) -> Option<&Cow<'static, str>> {
         match self {
             EnvError::Missing { name }
@@ -316,7 +367,23 @@ fn read_env_req<T>(
     read_req(name, &empty, parse)
 }
 
-/// Reads a required variable.
+/// Reads a required variable and parses it into `T: FromStr`.
+///
+/// Accepts static string literals (zero allocation), dynamic `String`s,
+/// or `Cow<'static, str>`.
+///
+/// Returns [`EnvError::Missing`] if unset, or [`EnvError::Invalid`] if parsing fails.
+///
+/// # Example
+///
+/// ```
+/// # fn main() -> Result<(), typedenv::EnvError> {
+/// # unsafe { std::env::set_var("TYPEDENV_PORT_DOC", "8080"); }
+/// let port: u16 = typedenv::var("TYPEDENV_PORT_DOC")?;
+/// assert_eq!(port, 8080);
+/// # Ok(())
+/// # }
+/// ```
 pub fn var<T>(name: impl Into<Cow<'static, str>>) -> Result<T, EnvError>
 where
     T: FromStr,
@@ -327,7 +394,18 @@ where
 
 /// Reads a variable, using `default` only when it is **unset**.
 ///
-/// A value that is set but malformed is still an error.
+/// **Important**: A value that is set but malformed is an [`EnvError::Invalid`],
+/// never silently replaced by `default`.
+///
+/// # Example
+///
+/// ```
+/// # fn main() -> Result<(), typedenv::EnvError> {
+/// let port: u16 = typedenv::var_or("TYPEDENV_UNSET_PORT_DOC", 8080u16)?;
+/// assert_eq!(port, 8080);
+/// # Ok(())
+/// # }
+/// ```
 pub fn var_or<T>(name: impl Into<Cow<'static, str>>, default: T) -> Result<T, EnvError>
 where
     T: FromStr,
@@ -336,7 +414,19 @@ where
     Ok(read_env_opt(name.into(), parse_str::<T>)?.unwrap_or(default))
 }
 
-/// Reads an optional variable: `Ok(None)` when unset.
+/// Reads an optional variable: returns `Ok(None)` when unset.
+///
+/// If the variable is set but fails to parse, returns [`EnvError::Invalid`].
+///
+/// # Example
+///
+/// ```
+/// # fn main() -> Result<(), typedenv::EnvError> {
+/// let sentry: Option<String> = typedenv::var_opt("TYPEDENV_UNSET_SENTRY_DOC")?;
+/// assert_eq!(sentry, None);
+/// # Ok(())
+/// # }
+/// ```
 pub fn var_opt<T>(name: impl Into<Cow<'static, str>>) -> Result<Option<T>, EnvError>
 where
     T: FromStr,
@@ -345,13 +435,36 @@ where
     read_env_opt(name.into(), parse_str::<T>)
 }
 
-/// Reads a required boolean. Accepts `true/false/1/0/yes/no/y/n/on/off`
+/// Reads a required boolean flag. Accepts `true/false/1/0/yes/no/y/n/on/off`
 /// (case-insensitive).
+///
+/// # Example
+///
+/// ```
+/// # fn main() -> Result<(), typedenv::EnvError> {
+/// # unsafe { std::env::set_var("TYPEDENV_FLAG_DOC", "yes"); }
+/// let enabled = typedenv::var_bool("TYPEDENV_FLAG_DOC")?;
+/// assert!(enabled);
+/// # Ok(())
+/// # }
+/// ```
 pub fn var_bool(name: impl Into<Cow<'static, str>>) -> Result<bool, EnvError> {
     read_env_req(name.into(), parse_bool)
 }
 
-/// Reads a boolean, using `default` only when unset.
+/// Reads a boolean flag, using `default` only when unset.
+///
+/// Malformed values return [`EnvError::Invalid`] rather than falling back to `default`.
+///
+/// # Example
+///
+/// ```
+/// # fn main() -> Result<(), typedenv::EnvError> {
+/// let debug = typedenv::var_bool_or("TYPEDENV_UNSET_DEBUG_DOC", false)?;
+/// assert!(!debug);
+/// # Ok(())
+/// # }
+/// ```
 pub fn var_bool_or(name: impl Into<Cow<'static, str>>, default: bool) -> Result<bool, EnvError> {
     Ok(read_env_opt(name.into(), parse_bool)?.unwrap_or(default))
 }
@@ -484,7 +597,9 @@ impl Loader {
         self
     }
 
-    /// Required variable. Returns `T::default()` and records an error on failure.
+    /// Reads a required variable.
+    ///
+    /// Returns `T::default()` as a temporary placeholder and records an error on failure.
     ///
     /// For types that do not implement [`Default`], consider [`Loader::var_or`]
     /// or [`Loader::var_opt`].
@@ -496,8 +611,10 @@ impl Loader {
         self.lookup_req(name.into(), parse_str::<T>)
     }
 
-    /// Variable with a default used only when unset. Malformed values are
-    /// recorded as errors (and `default` is returned as a placeholder).
+    /// Reads a variable with a fallback default.
+    ///
+    /// If the variable is unset, `default` is returned. If the variable is set but malformed,
+    /// an error is recorded in the loader and `default` is returned as a placeholder.
     pub fn var_or<T>(&mut self, name: impl Into<Cow<'static, str>>, default: T) -> T
     where
         T: FromStr,
@@ -513,8 +630,10 @@ impl Loader {
         }
     }
 
-    /// Optional variable. `None` when unset or when malformed (the latter is
-    /// also recorded as an error).
+    /// Reads an optional variable: `Ok(None)` when unset.
+    ///
+    /// If the variable is set but malformed, an error is recorded in the loader and `None` is
+    /// returned as a placeholder.
     pub fn var_opt<T>(&mut self, name: impl Into<Cow<'static, str>>) -> Option<T>
     where
         T: FromStr,
@@ -523,12 +642,17 @@ impl Loader {
         self.lookup_opt(name.into(), parse_str::<T>)
     }
 
-    /// Required boolean (`true/false/1/0/yes/no/y/n/on/off`).
+    /// Reads a required boolean flag (`true/false/1/0/yes/no/y/n/on/off`, case-insensitive).
+    ///
+    /// Returns `false` as a placeholder and records an error on failure.
     pub fn var_bool(&mut self, name: impl Into<Cow<'static, str>>) -> bool {
         self.lookup_req(name.into(), parse_bool)
     }
 
-    /// Boolean with a default used only when unset.
+    /// Reads a boolean flag with a default used only when unset.
+    ///
+    /// If the variable is set but malformed, an error is recorded in the loader and `default`
+    /// is returned as a placeholder.
     pub fn var_bool_or(&mut self, name: impl Into<Cow<'static, str>>, default: bool) -> bool {
         match read_opt(name.into(), &self.file, parse_bool) {
             Ok(Some(v)) => v,
@@ -540,7 +664,9 @@ impl Loader {
         }
     }
 
-    /// Required list split on `sep`. Returns an empty vector on failure and records an error.
+    /// Reads a required delimited list split on `sep`.
+    ///
+    /// Returns an empty vector as a placeholder and records an error on failure.
     pub fn var_list<T>(&mut self, name: impl Into<Cow<'static, str>>, sep: char) -> Vec<T>
     where
         T: FromStr,
@@ -549,7 +675,9 @@ impl Loader {
         self.lookup_req(name.into(), |s| parse_list::<T>(s, sep))
     }
 
-    /// List with a default used only when unset.
+    /// Reads a delimited list with a default used only when unset.
+    ///
+    /// If set but malformed, an error is recorded and `default` is returned as a placeholder.
     pub fn var_list_or<T>(
         &mut self,
         name: impl Into<Cow<'static, str>>,

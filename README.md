@@ -241,6 +241,43 @@ When string literals are used, no heap allocations occur during lookup, and any 
 
 ---
 
+### API Reference
+
+| Function / Method | Signature | Unset Behavior | Invalid Value Behavior |
+| :--- | :--- | :--- | :--- |
+| `var<T>` | `name -> Result<T, EnvError>` | Returns `Err(EnvError::Missing)` | Returns `Err(EnvError::Invalid)` |
+| `var_or<T>` | `name, default: T -> Result<T, EnvError>` | Returns `Ok(default)` | Returns `Err(EnvError::Invalid)` |
+| `var_opt<T>` | `name -> Result<Option<T>, EnvError>` | Returns `Ok(None)` | Returns `Err(EnvError::Invalid)` |
+| `var_bool` | `name -> Result<bool, EnvError>` | Returns `Err(EnvError::Missing)` | Returns `Err(EnvError::Invalid)` |
+| `var_bool_or` | `name, default: bool -> Result<bool, EnvError>` | Returns `Ok(default)` | Returns `Err(EnvError::Invalid)` |
+| `var_list<T>` | `name, sep: char -> Result<Vec<T>, EnvError>` | Returns `Err(EnvError::Missing)` | Returns `Err(EnvError::Invalid)` (indexed) |
+| `var_list_or<T>` | `name, sep: char, default: Vec<T> -> Result<Vec<T>, EnvError>` | Returns `Ok(default)` | Returns `Err(EnvError::Invalid)` (indexed) |
+| `Loader::var<T>` | `&mut self, name -> T` | Records `Missing`, returns `T::default()` | Records `Invalid`, returns `T::default()` |
+| `Loader::var_or<T>` | `&mut self, name, default: T -> T` | Returns `default` | Records `Invalid`, returns `default` |
+| `Loader::var_opt<T>` | `&mut self, name -> Option<T>` | Returns `None` | Records `Invalid`, returns `None` |
+| `Loader::var_bool` | `&mut self, name -> bool` | Records `Missing`, returns `false` | Records `Invalid`, returns `false` |
+| `Loader::var_bool_or` | `&mut self, name, default: bool -> bool` | Returns `default` | Records `Invalid`, returns `default` |
+| `Loader::var_list<T>` | `&mut self, name, sep: char -> Vec<T>` | Records `Missing`, returns `vec![]` | Records `Invalid`, returns `vec![]` |
+| `Loader::var_list_or<T>` | `&mut self, name, sep: char, default: Vec<T> -> Vec<T>` | Returns `default` | Records `Invalid`, returns `default` |
+| `Loader::with_dotenv` | `self, path -> Self` | Missing file ignored silently | Records `Dotenv` with file & line |
+| `Loader::finish` | `self -> Result<(), Errors>` | Returns `Ok(())` | Returns `Err(Errors)` with all problems |
+
+---
+
+### Why typedenv?
+
+| Feature | `typedenv` | `envy` | `config-rs` | Manual `std::env::var` |
+| :--- | :---: | :---: | :---: | :---: |
+| **Dependencies** | **0 (pure stdlib)** | Serde ecosystem | 15+ crates | 0 |
+| **Compile Overhead** | **< 0.5s cold build** | Heavy (proc-macros) | Heavy | None |
+| **Zero-Allocation Keys** | **Yes (`Cow<'static, str>`)** | No | No | No (allocates `String`) |
+| **Batch Error Reporting** | **Yes (`Loader` reports all)** | No (fails on 1st) | No | No (stops on 1st `?`) |
+| **Strict Defaults** | **Yes (invalid value is error)** | Derives defaults | Often silent | Verbose manual checks |
+| **Thread-Safe (No Env Mutation)** | **Yes (read-only)** | Yes | Mutates / depends | Safe |
+| **In-Tree `.env` Support** | **Yes (zero deps)** | No (needs `dotenvy`) | Multiple formats | No |
+
+---
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.
