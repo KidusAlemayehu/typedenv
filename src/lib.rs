@@ -388,9 +388,7 @@ where
     Ok(read_env_opt(name.into(), |s| parse_list::<T>(s, sep))?.unwrap_or(default))
 }
 
-// ---------------------------------------------------------------------------
 // Loader: collect every problem, report once
-// ---------------------------------------------------------------------------
 
 /// Collects errors across many lookups so you can report them all at once.
 ///
@@ -583,9 +581,7 @@ impl Loader {
     }
 }
 
-// ---------------------------------------------------------------------------
 // .env parsing
-// ---------------------------------------------------------------------------
 
 #[cfg(feature = "dotenv")]
 fn parse_dotenv(src: &str) -> (FileVars, Vec<(usize, String)>) {
@@ -685,9 +681,7 @@ fn parse_value(s: &str) -> Result<String, String> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests;
